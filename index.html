@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>八番通路</title>
+<style>
+:root{color-scheme:dark}*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#050607;color:#f4f4f4;font-family:-apple-system,BlinkMacSystemFont,"Hiragino Kaku Gothic ProN",sans-serif;touch-action:manipulation}
+#game{position:fixed;inset:0;width:100%;height:100%;display:block;background:#080a0c}
+.hud{position:fixed;top:env(safe-area-inset-top,10px);left:0;right:0;display:flex;justify-content:space-between;padding:12px 15px;pointer-events:none;font-size:13px;text-shadow:0 2px 4px #000}
+.bottom{position:fixed;left:0;right:0;bottom:calc(12px + env(safe-area-inset-bottom,0px));display:flex;gap:10px;padding:0 12px}
+button{font:inherit;color:white;border:1px solid #85898d;background:rgba(15,18,20,.92);border-radius:13px;min-height:62px;padding:10px 8px;flex:1;box-shadow:0 5px 18px #0008;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
+button:active{background:#43484c;transform:scale(.985)}button small{display:block;font-size:11px;opacity:.8;margin-top:3px}
+.overlay{position:fixed;inset:0;background:#000b;display:flex;align-items:center;justify-content:center;padding:24px;z-index:5}
+.panel{width:min(420px,100%);padding:26px 20px;background:#111416;border:1px solid #5e6367;border-radius:16px;text-align:center;box-shadow:0 12px 50px #000}
+h1{font-size:29px;letter-spacing:.08em;margin:0 0 18px}p{line-height:1.8;font-size:14px;color:#ddd}.primary{width:100%;min-height:54px;background:#e4e4e4;color:#111;border:0;font-weight:700;margin-top:8px}.hide{display:none!important}
+#message{position:fixed;top:24%;left:10%;right:10%;text-align:center;font-size:20px;font-weight:700;text-shadow:0 2px 8px #000;pointer-events:none}
+#flash{position:fixed;inset:0;background:#fff;opacity:0;pointer-events:none}
+</style>
+</head>
+<body>
+<canvas id="game" aria-label="地下通路のゲーム画面"></canvas>
+<div class="hud"><span id="level">八番通路</span><span id="count">通過 0 / 8</span></div>
+<div id="message"></div><div id="flash"></div>
+<div class="bottom"><button id="turn">↶ 振り返る<small>異変があれば戻る</small></button><button id="forward">前へ進む ↗<small>異変がなければ進む</small></button></div>
+<button id="soundToggle" aria-label="音のオン・オフ" style="position:fixed;right:12px;top:calc(54px + env(safe-area-inset-top,0px));z-index:2;flex:none;min-height:38px;padding:6px 12px;border-radius:999px;font-size:12px;background:#111a">🔊 音 ON</button>
+<div class="overlay" id="intro"><div class="panel"><h1>八番通路</h1><p>無人の地下通路を進み、異変を見つけよう。<br>異変があれば「振り返る」。<br>異変がなければ「前へ進む」。<br>正しい判断を重ねて、出口を目指そう。</p><p>音あり版：低い環境音、足音、異変の効果音を追加。<br>音が出ないときは「音 ON」を確認してね。</p><button class="primary" id="start">通路に入る</button></div></div>
+<div class="overlay hide" id="end"><div class="panel"><h1 id="endTitle">脱出</h1><p id="endText"></p><button class="primary" id="restart">もう一度プレイ</button></div></div>
+<script>
+(function(){
+'use strict';
+const canvas=document.getElementById('game'),ctx=canvas.getContext('2d');
+const intro=document.getElementById('intro'),end=document.getElementById('end');
+const message=document.getElementById('message'),flash=document.getElementById('flash');
+const countEl=document.getElementById('count'),levelEl=document.getElementById('level');
+let active=false,passed=0,walk=0,anomaly=false,turning=false,scare=false,seed=0;
+
+let audioCtx=null, masterGain=null, droneGain=null, soundEnabled=true, droneOsc=null, droneOsc2=null, droneLfo=null, droneLfoGain=null;
+let footTimer=null;
+function initAudio(){
+ if(!soundEnabled)return;
+ try{
+  const AC=window.AudioContext||window.webkitAudioContext;
+  if(!AC)return;
+  if(!audioCtx){
+   audioCtx=new AC();
+   masterGain=audioCtx.createGain(); masterGain.gain.value=0.42; masterGain.connect(audioCtx.destination);
+   // A quiet, low tunnel hum made entirely in Web Audio (no downloads needed).
+   droneGain=audioCtx.createGain(); droneGain.gain.value=0.0001; droneGain.connect(masterGain);
+   droneOsc=audioCtx.createOscillator(); droneOsc.type='sine'; droneOsc.frequency.value=54; droneOsc.connect(droneGain); droneOsc.start();
+   droneOsc2=audioCtx.createOscillator(); droneOsc2.type='triangle'; droneOsc2.frequency.value=81; 
+   const g2=audioCtx.createGain(); g2.gain.value=0.10; droneOsc2.connect(g2); g2.connect(droneGain); droneOsc2.start();
+   droneLfo=audioCtx.createOscillator(); droneLfo.type='sine'; droneLfo.frequency.value=0.18;
+   droneLfoGain=audioCtx.createGain(); droneLfoGain.gain.value=0.0009;
+   droneLfo.connect(droneLfoGain); droneLfoGain.connect(droneGain.gain); droneLfo.start();
+  }
+  if(audioCtx.state==='suspended')audioCtx.resume();
+  droneGain.gain.setTargetAtTime(0.014,audioCtx.currentTime,1.2);
+ }catch(e){}
+}
+function stopDrone(){
+ if(audioCtx&&droneGain){try{droneGain.gain.setTargetAtTime(0.0001,audioCtx.currentTime,0.2)}catch(e){}}
+}
+function tone(freq,duration,type,volume,when,slideTo){
+ if(!soundEnabled)return;
+ initAudio();
+ if(!audioCtx||!masterGain)return;
+ try{
+  const t=when||audioCtx.currentTime, o=audioCtx.createOscillator(), g=audioCtx.createGain();
+  o.type=type||'sine'; o.frequency.setValueAtTime(freq,t);
+  if(slideTo)o.frequency.exponentialRampToValueAtTime(Math.max(1,slideTo),t+duration);
+  g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(Math.max(0.0002,volume||0.04),t+0.025);
+  g.gain.exponentialRampToValueAtTime(0.0001,t+duration);
+  o.connect(g);g.connect(masterGain);o.start(t);o.stop(t+duration+0.04);
+ }catch(e){}
+}
+function noiseBurst(duration,volume,filterFreq){
+ if(!soundEnabled)return;
+ initAudio(); if(!audioCtx||!masterGain)return;
+ try{
+  const length=Math.floor(audioCtx.sampleRate*duration), buffer=audioCtx.createBuffer(1,length,audioCtx.sampleRate), data=buffer.getChannelData(0);
+  for(let i=0;i<length;i++)data[i]=(Math.random()*2-1)*(1-i/length);
+  const src=audioCtx.createBufferSource(), filter=audioCtx.createBiquadFilter(), g=audioCtx.createGain();
+  src.buffer=buffer;filter.type='lowpass';filter.frequency.value=filterFreq||700;
+  g.gain.setValueAtTime(volume||0.025,audioCtx.currentTime);g.gain.exponentialRampToValueAtTime(0.0001,audioCtx.currentTime+duration);
+  src.connect(filter);filter.connect(g);g.connect(masterGain);src.start();
+ }catch(e){}
+}
+function playStep(){ if(soundEnabled){tone(72,0.13,'triangle',0.035);noiseBurst(0.10,0.018,260)} }
+function playCreak(){tone(330,0.45,'sawtooth',0.035,undefined,95);tone(480,0.25,'sine',0.018,undefined,220)}
+function playCorrect(turn){
+ if(!soundEnabled)return;
+ if(turn){tone(280,0.12,'sine',0.035);tone(190,0.22,'sine',0.025,audioCtx?audioCtx.currentTime+0.11:undefined)}
+ else {tone(115,0.22,'sine',0.025)}
+}
+function playScare(){
+ if(!soundEnabled)return;
+ initAudio();
+ if(!audioCtx)return;
+ const t=audioCtx.currentTime;
+ tone(95,0.72,'sawtooth',0.16,t,32);
+ tone(760,0.18,'square',0.045,t,180);
+ noiseBurst(0.55,0.12,1600);
+}
+function playWin(){
+ if(!soundEnabled)return;
+ const t=audioCtx?audioCtx.currentTime:undefined;
+ tone(330,0.18,'sine',0.035,t);tone(440,0.22,'sine',0.035,audioCtx?audioCtx.currentTime+0.17:undefined);tone(554,0.35,'sine',0.04,audioCtx?audioCtx.currentTime+0.37:undefined);
+}
+function startFootsteps(){
+ if(footTimer)clearInterval(footTimer);
+ if(!soundEnabled)return;
+ footTimer=setInterval(()=>{if(active)playStep()},2300);
+}
+function stopFootsteps(){if(footTimer){clearInterval(footTimer);footTimer=null}}
+function updateSoundButton(){
+ const b=document.getElementById('soundToggle');
+ if(b)b.textContent=soundEnabled?'🔊 音 ON':'🔇 音 OFF';
+}
+function resize(){const d=Math.min(window.devicePixelRatio||1,2);canvas.width=Math.floor(innerWidth*d);canvas.height=Math.floor(innerHeight*d);canvas.style.width=innerWidth+'px';canvas.style.height=innerHeight+'px';ctx.setTransform(d,0,0,d,0,0);draw()}
+window.addEventListener('resize',resize);
+function poly(points,color){ctx.fillStyle=color;ctx.beginPath();ctx.moveTo(points[0][0],points[0][1]);for(let i=1;i<points.length;i++)ctx.lineTo(points[i][0],points[i][1]);ctx.closePath();ctx.fill()}
+function line(points,color,width=2){ctx.strokeStyle=color;ctx.lineWidth=width;ctx.beginPath();ctx.moveTo(points[0][0],points[0][1]);for(let i=1;i<points.length;i++)ctx.lineTo(points[i][0],points[i][1]);ctx.stroke()}
+function draw(){
+ const w=innerWidth,h=innerHeight,cx=w/2,cy=h*.44;
+ ctx.clearRect(0,0,w,h);ctx.fillStyle='#080a0c';ctx.fillRect(0,0,w,h);
+ // long perspective corridor
+ poly([[0,0],[w,0],[cx+w*.13,cy-h*.13],[cx-w*.13,cy-h*.13]],'#171a1c');
+ poly([[0,h],[w,h],[cx+w*.13,cy+h*.13],[cx-w*.13,cy+h*.13]],'#282a2b');
+ poly([[0,0],[cx-w*.13,cy-h*.13],[cx-w*.13,cy+h*.13],[0,h]],'#343638');
+ poly([[w,0],[cx+w*.13,cy-h*.13],[cx+w*.13,cy+h*.13],[w,h]],'#222527');
+ // tiled floor and wall seams
+ for(let i=1;i<=8;i++){let t=i/9,y=cy+h*.13+(h-cy-h*.13)*t*t;line([[0,y],[w,y]],'#444749',1)}
+ for(let i=-5;i<=5;i++){line([[cx,cy+h*.13],[cx+i*w*.22,h]],'#454849',1)}
+ for(let t=.18;t<1;t+=.2){let yy=cy-h*.13+(h*.26)*t;line([[0,yy],[cx-w*.13,yy]],'#484b4d',1);line([[w,yy],[cx+w*.13,yy]],'#3d4042',1)}
+ // ceiling lamps
+ for(let i=0;i<4;i++){let t=(i+1)/5, y=cy-h*.13-(h*.14)*(1-t);let ww=w*.04*(1-t*.6);poly([[cx-ww,y],[cx+ww,y],[cx+ww*1.2,y+7*(1-t)],[cx-ww*1.2,y+7*(1-t)]],i===0?'#ddd8bc':'#8c8b7d')}
+ // far doorway
+ poly([[cx-w*.105,cy-h*.13],[cx+w*.105,cy-h*.13],[cx+w*.105,cy+h*.13],[cx-w*.105,cy+h*.13]],'#07090a');
+ poly([[cx-w*.085,cy-h*.1],[cx+w*.085,cy-h*.1],[cx+w*.085,cy+h*.105],[cx-w*.085,cy+h*.105]],'#15191a');
+ // sign
+ poly([[cx-w*.19,cy-h*.03],[cx-w*.12,cy-h*.03],[cx-w*.12,cy+h*.035],[cx-w*.19,cy+h*.035]],anomaly&&seed%3===0?'#6b1616':'#b8b7a9');
+ ctx.fillStyle='#171819';ctx.font='bold '+Math.max(10,w*.018)+'px sans-serif';ctx.textAlign='center';ctx.fillText(anomaly&&seed%3===0?'出口→':'出口',cx-w*.155,cy+h*.008);
+ // anomalies: altered sign, dark silhouette or flicker
+ if(anomaly){
+  if(seed%3===0){ctx.fillStyle='#efc6c6';ctx.font='bold '+Math.max(15,w*.03)+'px sans-serif';ctx.fillText('出口←',cx,cy-h*.02)}
+  else if(seed%3===1){ctx.fillStyle='#020303';ctx.beginPath();ctx.ellipse(cx+w*.035,cy+h*.055,w*.035,h*.085,0,0,Math.PI*2);ctx.fill();ctx.fillRect(cx+w*.005,cy+h*.04,w*.06,h*.12);ctx.fillStyle='#d7d7d7';ctx.fillRect(cx+w*.02,cy+h*.015,3,3);ctx.fillRect(cx+w*.045,cy+h*.015,3,3)}
+  else {poly([[cx-w*.13,cy-h*.12],[cx+w*.13,cy-h*.12],[cx+w*.13,cy+h*.12],[cx-w*.13,cy+h*.12]],'#08090a');ctx.fillStyle='#a9a9a9';ctx.fillRect(cx-2,cy-4,4,4)}
+ }
+ // vignette
+ const g=ctx.createRadialGradient(cx,cy,Math.min(w,h)*.15,cx,cy,Math.max(w,h)*.72);g.addColorStop(0,'#0000');g.addColorStop(1,'#000b');ctx.fillStyle=g;ctx.fillRect(0,0,w,h);
+ if(scare){ctx.fillStyle='#000';ctx.fillRect(0,0,w,h);ctx.fillStyle='#f3f3f3';ctx.beginPath();ctx.ellipse(cx,cy,w*.18,h*.19,0,0,Math.PI*2);ctx.fill();ctx.fillStyle='#080808';ctx.beginPath();ctx.ellipse(cx-w*.06,cy-h*.025,w*.025,h*.04,0,0,Math.PI*2);ctx.ellipse(cx+w*.06,cy-h*.025,w*.025,h*.04,0,0,Math.PI*2);ctx.fill();ctx.fillStyle='#a00';ctx.fillRect(cx-w*.08,cy+h*.065,w*.16,h*.025)}
+}
+function newHall(){seed++;anomaly=Math.random()<.42;turning=false;scare=false;message.textContent='';draw();if(active&&soundEnabled){if(anomaly)playCreak();else tone(58,0.16,'sine',0.012)}}
+function start(){initAudio();if(soundEnabled){tone(145,0.3,'sine',0.025);startFootsteps()}else stopFootsteps();passed=0;walk=0;active=true;intro.classList.add('hide');end.classList.add('hide');countEl.textContent='通過 0 / 8';levelEl.textContent='八番通路';newHall()}
+function decide(turn){if(!active)return;const correct=(turn===anomaly);if(correct){passed++;playCorrect(turn);countEl.textContent='通過 '+passed+' / 8';message.textContent=turn?'異変を見抜いた':'何も起きていない…';if(passed>=8){active=false;stopFootsteps();stopDrone();playWin();end.classList.remove('hide');document.getElementById('endTitle').textContent='脱出成功';document.getElementById('endText').textContent='異変を見極め、通路から脱出した！';return}setTimeout(()=>{if(active)newHall()},650)}else{active=false;stopFootsteps();scare=true;draw();playScare();message.textContent='判断を間違えた';flash.style.opacity='.85';setTimeout(()=>flash.style.opacity='0',120);setTimeout(()=>{stopDrone();end.classList.remove('hide');document.getElementById('endTitle').textContent='通路に飲み込まれた';document.getElementById('endText').textContent='異変の判断を間違えた。もう一度挑戦しよう。'},650)}}
+document.getElementById('start').addEventListener('click',start);
+document.getElementById('restart').addEventListener('click',start);
+document.getElementById('forward').addEventListener('click',()=>decide(false));
+document.getElementById('turn').addEventListener('click',()=>decide(true));
+document.getElementById('soundToggle').addEventListener('click',()=>{soundEnabled=!soundEnabled;updateSoundButton();if(soundEnabled){initAudio();if(active)startFootsteps()}else{stopFootsteps();stopDrone()}});
+updateSoundButton();
+resize();
+})();
+</script>
+</body>
+</html>
